@@ -108,6 +108,39 @@ sqlite3IndexAffinityStr(sqlite3 * db, Index * pIdx)
 	return pIdx->zColAff;
 }
 
+char *
+sql_index_affinity_str(struct sqlite3 * db, struct index_def *def)
+{
+	char *aff;
+	/* The first time a column affinity string for a particular index is
+	 * required, it is allocated and populated here. It is then stored as
+	 * a member of the Index structure for subsequent use.
+	 *
+	 * The column affinity string will eventually be deleted by
+	 * sqliteDeleteIndex() when the Index structure itself is cleaned
+	 * up.
+	 */
+	int nColumn = def->key_def->part_count;
+	aff = (char *)sqlite3DbMallocRaw(0, nColumn + 1);
+	if (aff == NULL) {
+		sqlite3OomFault(db);
+		return 0;
+	}
+	int i;
+	struct space *space = space_cache_find(def->space_id);
+	assert(space != NULL);
+
+	for (i = 0; i < nColumn; i++) {
+		uint32_t x = def->key_def->parts[i].fieldno;
+		aff[i] = space->def->fields[x].affinity;
+		if (aff[i] == AFFINITY_UNDEFINED)
+			aff[i] = 'A';
+	}
+	aff[i] = 0;
+
+	return aff;
+}
+
 /*
  * Compute the affinity string for table pTab, if it has not already been
  * computed.  As an optimization, omit trailing AFFINITY_BLOB affinities.

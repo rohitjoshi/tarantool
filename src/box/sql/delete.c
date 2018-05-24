@@ -184,7 +184,7 @@ sql_table_delete_from(struct Parse *parse, struct SrcList *tab_list,
 		memset(&nc, 0, sizeof(nc));
 		nc.pParse = parse;
 		if (tab_list->a[0].pTab == NULL) {
-			struct Table *t = malloc(sizeof(struct Table));
+			struct Table *t = calloc(sizeof(struct Table), 1);
 			if (t == NULL) {
 				sqlite3OomFault(parse->db);
 				goto delete_from_cleanup;
@@ -266,7 +266,12 @@ sql_table_delete_from(struct Parse *parse, struct SrcList *tab_list,
 		/* Extract the primary key for the current row */
 		if (!is_view) {
 			for (int i = 0; i < pk_len; i++) {
-				sqlite3ExprCodeGetColumnOfTable(v, table->def,
+				struct space_def *def;
+				if (table != NULL)
+					def = table->def;
+				else
+					def = space->def;
+				sqlite3ExprCodeGetColumnOfTable(v, def,
 								tab_cursor,
 								pk_def->parts[i].fieldno,
 								reg_pk + i);
@@ -339,8 +344,18 @@ sql_table_delete_from(struct Parse *parse, struct SrcList *tab_list,
 			int space_ptr_reg = ++parse->nMem;
 			sqlite3VdbeAddOp4(v, OP_LoadPtr, 0, space_ptr_reg, 0,
 					  (void *)space, P4_SPACEPTR);
+
+			int tnum;
+			if (table != NULL) {
+				tnum = table->tnum;
+			}
+			else {
+				/* index id is 0 for PK.  */
+				tnum = SQLITE_PAGENO_FROM_SPACEID_AND_INDEXID(space->def->id,
+									      0);
+			}
 			sqlite3VdbeAddOp3(v, OP_OpenWrite, tab_cursor,
-					  table->tnum, space_ptr_reg);
+					  tnum, space_ptr_reg);
 			struct key_def *def = key_def_dup(pk_def);
 			if (def == NULL) {
 				sqlite3OomFault(parse->db);
@@ -446,7 +461,8 @@ sql_generate_row_delete(struct Parse *parse, struct Table *table,
 	/* If there are any triggers to fire, allocate a range of registers to
 	 * use for the old.* references in the triggers.
 	 */
-	if (sqlite3FkRequired(table, NULL) || trigger_list != NULL) {
+	if (table != NULL &&
+	    (sqlite3FkRequired(table, NULL) || trigger_list != NULL)) {
 		/* Mask of OLD.* columns in use */
 		/* TODO: Could use temporary registers here. */
 		uint32_t mask =
@@ -505,7 +521,7 @@ sql_generate_row_delete(struct Parse *parse, struct Table *table,
 	 * of the DELETE statement is to fire the INSTEAD OF
 	 * triggers).
 	 */
-	if (table->pSelect == NULL) {
+	if (table == NULL || table->pSelect == NULL) {
 		uint8_t p5 = 0;
 		sqlite3VdbeAddOp2(v, OP_Delete, cursor,
 				  (need_update_count ? OPFLAG_NCHANGE : 0));
@@ -520,16 +536,20 @@ sql_generate_row_delete(struct Parse *parse, struct Table *table,
 		sqlite3VdbeChangeP5(v, p5);
 	}
 
-	/* Do any ON CASCADE, SET NULL or SET DEFAULT operations
-	 * required to handle rows (possibly in other tables) that
-	 * refer via a foreign key to the row just deleted.
-	 */
-	sqlite3FkActions(parse, table, 0, first_old_reg, 0);
+	if (table != NULL) {
+		/* Do any ON CASCADE, SET NULL or SET DEFAULT
+		 * operations required to handle rows (possibly
+		 * in other tables) that refer via a foreign
+		 * key to the row just deleted.
+		 */
 
-	/* Invoke AFTER DELETE trigger programs. */
-	sqlite3CodeRowTrigger(parse, trigger_list,
-			      TK_DELETE, 0, TRIGGER_AFTER, table, first_old_reg,
-			      onconf, label);
+		sqlite3FkActions(parse, table, 0, first_old_reg, 0);
+
+		/* Invoke AFTER DELETE trigger programs. */
+		sqlite3CodeRowTrigger(parse, trigger_list,
+				      TK_DELETE, 0, TRIGGER_AFTER, table,
+				      first_old_reg, onconf, label);
+	}
 
 	/* Jump here if the row had already been deleted before
 	 * any BEFORE trigger programs were invoked. Or if a trigger program
