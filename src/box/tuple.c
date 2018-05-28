@@ -48,6 +48,16 @@ enum {
 	OBJSIZE_MIN = 16,
 };
 
+/**
+* @brief Container for bigrefs.
+*/
+struct tuple_bigrefs
+{
+	uint32_t *refs;
+	uint16_t size;
+	uint16_t capacity;
+};
+
 static const double ALLOC_FACTOR = 1.05;
 
 /**
@@ -57,6 +67,12 @@ static const double ALLOC_FACTOR = 1.05;
 struct tuple *box_tuple_last;
 
 struct tuple_format *tuple_format_runtime;
+
+/**
+* All bigrefs of tuples.
+* \sa tuple_ref_slow()
+*/
+static struct tuple_bigrefs bigrefs;
 
 static void
 runtime_tuple_delete(struct tuple_format *format, struct tuple *tuple);
@@ -211,6 +227,10 @@ tuple_init(field_name_hash_f hash)
 
 	box_tuple_last = NULL;
 
+	bigrefs.size = 0;
+	bigrefs.refs = NULL;
+	bigrefs.capacity = 0;
+
 	if (coll_id_cache_init() != 0)
 		return -1;
 
@@ -244,6 +264,152 @@ tuple_arena_create(struct slab_arena *arena, struct quota *quota,
 	}
 }
 
+enum {
+	TUPLE_BIGREF_FACTOR = 2,
+	TUPLE_BIGREF_MAX = UINT32_MAX,
+	TUPLE_BIGREF_ERROR = UINT16_MAX,
+	TUPLE_BIGREF_FLAG = UINT16_MAX ^ (UINT16_MAX >> 1),
+	TUPLE_BIGREF_MIN_CAPACITY = 16,
+	TUPLE_BIGREF_MAX_CAPACITY = UINT16_MAX >> 1
+};
+
+/**
+ * Free memory that was allocated for big references.
+ */
+static inline void
+tuple_bigrefs_free(void)
+{
+	free(bigrefs.refs);
+	bigrefs.size = 0;
+	bigrefs.refs = NULL;
+	bigrefs.capacity = 0;
+}
+
+/**
+ * Return index for new big reference counter and allocate memory if needed.
+ * @retval index for new big reference counter.
+ */
+static inline uint16_t
+tuple_bigref_retrieve(void)
+{
+	if (bigrefs.size < bigrefs.capacity) {
+		for (uint16_t i = 0; i < bigrefs.capacity; ++i) {
+			if (bigrefs.refs[i] == 0) {
+				++bigrefs.size;
+				return i;
+			}
+		}
+		unreachable();
+	}
+	/* Extend the array ... */
+	uint16_t capacity = bigrefs.capacity;
+	if(bigrefs.refs == NULL) {
+		assert(bigrefs.size == 0 && bigrefs.capacity == 0);
+		capacity = TUPLE_BIGREF_MIN_CAPACITY;
+		bigrefs.refs = (uint32_t *) malloc(capacity *
+						   sizeof(*bigrefs.refs));
+		if(bigrefs.refs == NULL) {
+			diag_set(OutOfMemory, capacity * sizeof(*bigrefs.refs),
+				 "malloc", "bigrefs.refs");
+			return TUPLE_BIGREF_ERROR;
+		}
+		bigrefs.capacity = capacity;
+		return bigrefs.size++;
+	}
+	if(capacity >= TUPLE_BIGREF_MAX_CAPACITY) {
+		tuple_bigrefs_free();
+		return TUPLE_BIGREF_ERROR;
+	}
+	if(capacity > TUPLE_BIGREF_MAX_CAPACITY / TUPLE_BIGREF_FACTOR)
+		capacity = TUPLE_BIGREF_MAX_CAPACITY;
+	else
+		capacity *= TUPLE_BIGREF_FACTOR;
+	uint32_t *refs = (uint32_t *) realloc(bigrefs.refs, capacity *
+					      sizeof(*bigrefs.refs));
+	if (refs == NULL) {
+		tuple_bigrefs_free();
+		diag_set(OutOfMemory, capacity * sizeof(*bigrefs.refs),
+			 "realloc", "bigrefs.refs");
+		return TUPLE_BIGREF_ERROR;
+	}
+	bigrefs.refs = refs;
+	bigrefs.capacity = capacity;
+	return bigrefs.size++;
+}
+
+int
+tuple_ref_slow(struct tuple *tuple)
+{
+	if(tuple->refs == TUPLE_REF_MAX) {
+		uint16_t index = tuple_bigref_retrieve();
+		if(index > TUPLE_BIGREF_MAX_CAPACITY) {
+			panic("Tuple reference counter overflow");
+			return -1;
+		}
+		tuple->refs = TUPLE_BIGREF_FLAG | index;
+		bigrefs.refs[index] = TUPLE_REF_MAX;
+	}
+	uint16_t index = tuple->refs ^ TUPLE_BIGREF_FLAG;
+	if (bigrefs.refs[index] > TUPLE_BIGREF_MAX - 1) {
+		panic("Tuple reference counter overflow");
+		return -1;
+	}
+	bigrefs.refs[index]++;
+	return 0;
+}
+
+/**
+ * Try to decrease allocated memory if it is possible. Free memory when
+ * size == 0.
+ */
+static inline void
+tuple_bigrefs_release(void)
+{
+	if(bigrefs.size == 0) {
+		tuple_bigrefs_free();
+		return;
+	}
+	if(bigrefs.capacity == TUPLE_BIGREF_MIN_CAPACITY)
+		return;
+	uint16_t reserved_bigrefs = 0;
+	uint16_t capacity = bigrefs.capacity;
+	for(uint16_t i = 0; i < capacity; ++i) {
+		if(bigrefs.refs[i] != 0)
+			reserved_bigrefs = i + 1;
+	}
+	if(reserved_bigrefs >= capacity / TUPLE_BIGREF_FACTOR) {
+		return;
+	} else if(reserved_bigrefs < TUPLE_BIGREF_MIN_CAPACITY) {
+		capacity = TUPLE_BIGREF_MIN_CAPACITY;
+	} else {
+		while(reserved_bigrefs < capacity / TUPLE_BIGREF_FACTOR)
+			capacity /= TUPLE_BIGREF_FACTOR;
+	}
+	uint32_t *refs = (uint32_t *) realloc(bigrefs.refs, capacity *
+					      sizeof(*bigrefs.refs));
+	if(refs == NULL) {
+		tuple_bigrefs_free();
+		diag_set(OutOfMemory, capacity, "realloc", "bigrefs.refs");
+		return;
+	}
+	bigrefs.refs = refs;
+	bigrefs.capacity = capacity;
+}
+
+void
+tuple_unref_slow(struct tuple *tuple)
+{
+	uint16_t index = tuple->refs ^ TUPLE_BIGREF_FLAG;
+	bigrefs.refs[index]--;
+	if(bigrefs.refs[index] <= TUPLE_REF_MAX) {
+		tuple->refs = bigrefs.refs[index];
+		bigrefs.refs[index] = 0;
+		bigrefs.size--;
+		if(bigrefs.size < bigrefs.capacity / TUPLE_BIGREF_FACTOR)
+			tuple_bigrefs_release();
+	}
+}
+
 void
 tuple_arena_destroy(struct slab_arena *arena)
 {
@@ -265,6 +431,8 @@ tuple_free(void)
 	tuple_format_free();
 
 	coll_id_cache_destroy();
+
+	tuple_bigrefs_free();
 }
 
 box_tuple_format_t *

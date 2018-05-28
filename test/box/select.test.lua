@@ -124,12 +124,25 @@ test.random(s.index[0], 48)
 s:drop()
 
 collectgarbage('collect')
+
+-- gh-3224 resurrect tuple bigrefs
+
 s = box.schema.space.create('select', { temporary = true })
 index = s:create_index('primary', { type = 'tree' })
 a = s:insert{0}
 lots_of_links = {}
 ref_count = 0
-while (true) do table.insert(lots_of_links, s:get{0}) ref_count = ref_count + 1 end
+while (ref_count < 100000) do table.insert(lots_of_links, s:get{0}) ref_count = ref_count + 1 end
+ref_count
+for k, v in pairs(lots_of_links) do ref_count = ref_count - 1 end
 ref_count
 lots_of_links = {}
 s:drop()
+
+-- Check that tuple deleted when ref counter = 0
+
+weak_tuple = setmetatable({}, {__mode = 'v'})
+table.insert(weak_tuple, box.tuple.new(1))
+weak_tuple
+collectgarbage('collect')
+weak_tuple

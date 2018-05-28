@@ -774,24 +774,38 @@ tuple_field_uuid(const struct tuple *tuple, int fieldno,
 	return 0;
 }
 
-enum { TUPLE_REF_MAX = UINT16_MAX };
+enum { TUPLE_REF_MAX = UINT16_MAX >> 1 };
+
+/**
+ * Increase tuple big reference counter.
+ * @param tuple Tuple to reference.
+ * @retval  0 Success.
+ * @retval -1 Error.
+ */
+int
+tuple_ref_slow(struct tuple *tuple);
 
 /**
  * Increment tuple reference counter.
  * @param tuple Tuple to reference.
  * @retval  0 Success.
- * @retval -1 Too many refs error.
+ * @retval -1 Error.
  */
 static inline int
 tuple_ref(struct tuple *tuple)
 {
-	if (tuple->refs + 1 > TUPLE_REF_MAX) {
-		diag_set(ClientError, ER_TUPLE_REF_OVERFLOW);
-		return -1;
-	}
+	if (tuple->refs >= TUPLE_REF_MAX)
+		return tuple_ref_slow(tuple);
 	tuple->refs++;
 	return 0;
 }
+
+/**
+ * Decrease tuple big reference counter.
+ * @param tuple Tuple to reference.
+ */
+void
+tuple_unref_slow(struct tuple *tuple);
 
 /**
  * Decrement tuple reference counter. If it has reached zero, free the tuple.
@@ -802,6 +816,10 @@ static inline void
 tuple_unref(struct tuple *tuple)
 {
 	assert(tuple->refs - 1 >= 0);
+	if (tuple->refs > TUPLE_REF_MAX) {
+		tuple_unref_slow(tuple);
+		return;
+	}
 
 	tuple->refs--;
 
@@ -823,12 +841,8 @@ static inline box_tuple_t *
 tuple_bless(struct tuple *tuple)
 {
 	assert(tuple != NULL);
-	/* Ensure tuple can be referenced at least once after return */
-	if (tuple->refs + 2 > TUPLE_REF_MAX) {
-		diag_set(ClientError, ER_TUPLE_REF_OVERFLOW);
+	if(tuple_ref(tuple) < 0)
 		return NULL;
-	}
-	tuple->refs++;
 	/* Remove previous tuple */
 	if (likely(box_tuple_last != NULL))
 		tuple_unref(box_tuple_last); /* do not throw */

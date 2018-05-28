@@ -619,6 +619,7 @@ collectgarbage('collect')
 ---
 - 0
 ...
+-- gh-3224 resurrect tuple bigrefs
 s = box.schema.space.create('select', { temporary = true })
 ---
 ...
@@ -634,17 +635,42 @@ lots_of_links = {}
 ref_count = 0
 ---
 ...
-while (true) do table.insert(lots_of_links, s:get{0}) ref_count = ref_count + 1 end
+while (ref_count < 100000) do table.insert(lots_of_links, s:get{0}) ref_count = ref_count + 1 end
 ---
-- error: Tuple reference counter overflow
 ...
 ref_count
 ---
-- 65531
+- 100000
+...
+for k, v in pairs(lots_of_links) do ref_count = ref_count - 1 end
+---
+...
+ref_count
+---
+- 0
 ...
 lots_of_links = {}
 ---
 ...
 s:drop()
 ---
+...
+-- Check that tuple deleted when ref counter = 0
+weak_tuple = setmetatable({}, {__mode = 'v'})
+---
+...
+table.insert(weak_tuple, box.tuple.new(1))
+---
+...
+weak_tuple
+---
+- - [1]
+...
+collectgarbage('collect')
+---
+- 0
+...
+weak_tuple
+---
+- []
 ...
