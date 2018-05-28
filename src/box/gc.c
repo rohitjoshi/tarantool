@@ -243,6 +243,13 @@ gc_consumer_unregister(struct gc_consumer *consumer)
 }
 
 void
+gc_leftmost_delete(void)
+{
+	struct gc_consumer *leftmost = gc_tree_first(&gc.consumers);
+	gc_consumer_unregister(leftmost);
+}
+
+void
 gc_consumer_advance(struct gc_consumer *consumer, int64_t signature)
 {
 	int64_t prev_signature = consumer->signature;

@@ -180,8 +180,10 @@ process_rw(struct request *request, struct space *space, struct tuple **result)
 	 * when WAL is written in autocommit mode.
 	 */
 	TupleRefNil ref(tuple);
-	if (txn_commit_stmt(txn, request) != 0)
+	if (txn_commit_stmt(txn, request) != 0) {
+		gc_leftmost_delete();
 		return -1;
+	}
 	if (result != NULL) {
 		if (tuple != NULL && tuple_bless(tuple) == NULL)
 			return -1;

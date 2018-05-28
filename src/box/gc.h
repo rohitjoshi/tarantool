@@ -89,6 +89,14 @@ void
 gc_consumer_unregister(struct gc_consumer *consumer);
 
 /**
+ * Remove consumer with least recent vclock and invoke
+ * garbage collection. Originally created for cases with
+ * running out of disk space because of disconnected replica.
+ */
+void
+gc_leftmost_delete(void);
+
+/**
  * Advance the vclock signature tracked by a consumer and
  * invoke garbage collection if needed.
  */
