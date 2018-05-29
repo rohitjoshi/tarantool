@@ -42,6 +42,7 @@
 #include "column_mask.h"
 #include "fiber.h"
 #include "tuple_dictionary.h"
+#include "json/path.h"
 
 /** UPDATE request implementation.
  * UPDATE request is represented by a sequence of operations, each
@@ -230,6 +231,8 @@ struct update_op {
 	int32_t field_no;
 	uint32_t new_field_len;
 	uint8_t opcode;
+	const char *path;
+	uint32_t path_len;
 };
 
 /**
@@ -249,6 +252,7 @@ struct update_field {
 	 * next update_field structure.
 	 */
 	uint32_t tail_len;
+	struct rope *subtree;
 };
 
 static void
@@ -964,6 +968,8 @@ update_op_decode(struct update_op *op, int index_base,
 	uint32_t len;
 	op->opcode = *mp_decode_str(expr, &len);
 	op->meta = update_op_by(op->opcode);
+	op->path = NULL;
+	op->path_len = 0;
 	if (op->meta == NULL)
 		return -1;
 	if (args != op->meta->args) {
@@ -990,13 +996,50 @@ update_op_decode(struct update_op *op, int index_base,
 		const char *path = mp_decode_str(expr, &len);
 		uint32_t hash = field_name_hash(path, len);
 		uint32_t field_no;
-		if (tuple_fieldno_by_name(dict, path, len, hash,
-					  &field_no) != 0) {
-			diag_set(ClientError, ER_NO_SUCH_FIELD_NAME,
+		int rc = tuple_fieldno_by_name(dict, path, len, hash,
+					       &field_no);
+		if (rc == 0) {
+			op->field_no = (int32_t) field_no;
+			break;
+		}
+		struct json_path_parser parser;
+		json_path_parser_create(&parser, path, len);
+		struct json_path_node node;
+		rc = json_path_next(&parser, &node);
+		if (rc != 0) {
+			diag_set(ClientError, ER_INVALID_JSON, rc,
 				 tt_cstr(path, len));
 			return -1;
 		}
-		op->field_no = (int32_t) field_no;
+		switch(node.type) {
+		case JSON_PATH_NUM:
+			if (node.num == 0) {
+				diag_set(ClientError, ER_NO_SUCH_FIELD, 0);
+				return -1;
+			}
+			op->field_no = (int32_t) node.num;
+			break;
+		case JSON_PATH_STR:
+			hash = field_name_hash(node.str, node.len);
+			rc = tuple_fieldno_by_name(dict, node.str, node.len,
+						   hash, &field_no);
+			if (rc != 0) {
+				diag_set(ClientError, ER_NO_SUCH_FIELD_NAME,
+					 tt_cstr(node.str, node.len));
+				return -1;
+			}
+			op->field_no = (int32_t) field_no;
+			break;
+		case JSON_PATH_END:
+			diag_set(ClientError, ER_NO_SUCH_FIELD_NAME, "");
+			return -1;
+		default:
+			unreachable();
+		}
+		if ((uint32_t) parser.offset < len) {
+			op->path = path + parser.offset;
+			op->path_len = len - parser.offset;
+		}
 		break;
 	}
 	default:
