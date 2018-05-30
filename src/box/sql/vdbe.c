@@ -4693,36 +4693,7 @@ case OP_ParseSchema2: {
  * in database P2
  */
 case OP_ParseSchema3: {
-	InitData initData;
-	Mem *pRec;
-	char zPgnoBuf[16];
-	char *argv[4] = {NULL, zPgnoBuf, NULL, NULL};
-	assert(db->pSchema != NULL);
-
-	initData.db = db;
-	initData.pzErrMsg = &p->zErrMsg;
-
-	assert(db->init.busy==0);
-	db->init.busy = 1;
-	initData.rc = SQLITE_OK;
-	assert(!db->mallocFailed);
-
-	pRec = &aMem[pOp->p1];
-	argv[0] = pRec[0].z;
-	argv[1] = "0";
-	argv[2] = pRec[1].z;
-	sqlite3InitCallback(&initData, 3, argv, NULL);
-
-	rc = initData.rc;
-	db->init.busy = 0;
-
-	if (rc) {
-		sqlite3ResetAllSchemasOfConnection(db);
-		if (rc==SQLITE_NOMEM) {
-			goto no_mem;
-		}
-		goto abort_due_to_error;
-	}
+	unreachable();
 	break;
 }
 
@@ -4745,7 +4716,6 @@ case OP_RenameTable: {
 	const char *zNewTableName;
 	Table *pTab;
 	FKey *pFKey;
-	Trigger *pTrig;
 	int iRootPage;
 	InitData initData;
 	char *argv[4] = {NULL, NULL, NULL, NULL};
@@ -4758,11 +4728,11 @@ case OP_RenameTable: {
 	assert(zOldTableName);
 	pTab = sqlite3HashFind(&db->pSchema->tblHash, zOldTableName);
 	assert(pTab);
-	pTrig = pTab->pTrigger;
 	iRootPage = pTab->tnum;
 	zNewTableName = pOp->p4.z;
 	zOldTableName = sqlite3DbStrNDup(db, zOldTableName,
 					 sqlite3Strlen30(zOldTableName));
+
 	rc = tarantoolSqlite3RenameTable(pTab->tnum, zNewTableName,
 					 &zSqlStmt);
 	if (rc) goto abort_due_to_error;
@@ -4799,19 +4769,21 @@ case OP_RenameTable: {
 		goto abort_due_to_error;
 	}
 
-	pTab = sqlite3HashFind(&db->pSchema->tblHash, zNewTableName);
-	pTab->pTrigger = pTrig;
+	space = space_by_id(space_id);
+	assert(space != NULL);
 
-	/* Rename all trigger created on this table.*/
-	for (; pTrig; pTrig = pTrig->pNext) {
-		sqlite3DbFree(db, pTrig->table);
-		pTrig->table = sqlite3DbStrNDup(db, zNewTableName,
-						sqlite3Strlen30(zNewTableName));
-		pTrig->pTabSchema = pTab->pSchema;
-		rc = tarantoolSqlite3RenameTrigger(pTrig->zName,
+	/* Rename all trigger created on this table. */
+	for (struct Trigger *trigger = space->sql_triggers; trigger != NULL; ) {
+		struct Trigger *next_trigger = trigger->pNext;
+		rc = tarantoolSqlite3RenameTrigger(trigger->zName,
 						   zOldTableName, zNewTableName);
-		if (rc) goto abort_due_to_error;
+		if (rc != SQLITE_OK) {
+			sqlite3ResetAllSchemasOfConnection(db);
+			goto abort_due_to_error;
+		}
+		trigger = next_trigger;
 	}
+
 	sqlite3DbFree(db, (void*)zOldTableName);
 	sqlite3DbFree(db, (void*)zSqlStmt);
 	break;
@@ -4866,7 +4838,7 @@ case OP_DropIndex: {
  * schema consistent with what is on disk.
  */
 case OP_DropTrigger: {
-	sqlite3UnlinkAndDeleteTrigger(db, pOp->p4.z);
+	unreachable();
 	break;
 }
 #ifndef SQLITE_OMIT_TRIGGER

@@ -33,6 +33,9 @@
  * This file contains the implementation for TRIGGERs
  */
 
+#include "box/box.h"
+#include "box/tuple.h"
+#include "box/schema.h"
 #include "sqliteInt.h"
 #include "tarantoolInt.h"
 #include "vdbeInt.h"
@@ -81,7 +84,8 @@ sqlite3BeginTrigger(Parse * pParse,	/* The parse context of the CREATE TRIGGER s
     )
 {
 	Trigger *pTrigger = 0;	/* The new trigger */
-	Table *pTab;		/* Table that the trigger fires off of */
+	/* Table that the trigger fires off of. */
+	struct Table *table = NULL;
 	char *zName = 0;	/* Name of the trigger */
 	sqlite3 *db = pParse->db;	/* The database connection */
 	DbFixer sFix;		/* State vector for the DB fixer */
@@ -99,60 +103,65 @@ sqlite3BeginTrigger(Parse * pParse,	/* The parse context of the CREATE TRIGGER s
 	assert(op == TK_INSERT || op == TK_UPDATE || op == TK_DELETE);
 	assert(op > 0 && op < 0xff);
 
-	if (!pTableName || db->mallocFailed) {
+	if (!pTableName || db->mallocFailed)
 		goto trigger_cleanup;
-	}
 
 	/* Ensure the table name matches database name and that the table exists */
 	if (db->mallocFailed)
 		goto trigger_cleanup;
 	assert(pTableName->nSrc == 1);
 	sqlite3FixInit(&sFix, pParse, "trigger", pName);
-	if (sqlite3FixSrcList(&sFix, pTableName)) {
+	if (sqlite3FixSrcList(&sFix, pTableName))
 		goto trigger_cleanup;
-	}
-	pTab = sql_list_lookup_table(pParse, pTableName);
-	if (!pTab) {
-		goto trigger_cleanup;
-	}
 
-	/* Check that the trigger name is not reserved and that no trigger of the
-	 * specified name exists
-	 */
 	zName = sqlite3NameFromToken(db, pName);
-	if (!zName || SQLITE_OK != sqlite3CheckIdentifierName(pParse, zName)) {
+	if (zName == NULL)
 		goto trigger_cleanup;
-	}
-	if (sqlite3HashFind(&(db->pSchema->trigHash), zName)) {
-		if (!noErr) {
-			sqlite3ErrorMsg(pParse, "trigger %s already exists",
-					zName);
-		} else {
-			assert(!db->init.busy);
+
+	/* FIXME: Move all checks in VDBE #3435. */
+	if (!pParse->parse_only) {
+		if (sqlite3CheckIdentifierName(pParse, zName) != SQLITE_OK)
+			goto trigger_cleanup;
+
+		table = sql_list_lookup_table(pParse, pTableName);
+		if (table == NULL)
+			goto trigger_cleanup;
+
+		if (sqlite3HashFind(&(db->pSchema->trigHash), zName)) {
+			if (!noErr) {
+				sqlite3ErrorMsg(pParse,
+						"trigger %s already exists",
+						zName);
+			} else {
+				assert(!db->init.busy);
+			}
+			goto trigger_cleanup;
 		}
-		goto trigger_cleanup;
-	}
 
-	/* Do not create a trigger on a system table */
-	if (sqlite3StrNICmp(pTab->def->name, "sqlite_", 7) == 0) {
-		sqlite3ErrorMsg(pParse,
-				"cannot create trigger on system table");
-		goto trigger_cleanup;
-	}
+		/* Do not create a trigger on a system table */
+		if (sqlite3StrNICmp(table->def->name, "sqlite_", 7) == 0) {
+			sqlite3ErrorMsg(pParse,
+					"cannot create trigger on system table");
+			goto trigger_cleanup;
+		}
 
-	/* INSTEAD of triggers are only for views and views only support INSTEAD
-	 * of triggers.
-	 */
-	if (space_is_view(pTab) && tr_tm != TK_INSTEAD) {
-		sqlite3ErrorMsg(pParse, "cannot create %s trigger on view: %S",
-				(tr_tm == TK_BEFORE) ? "BEFORE" : "AFTER",
-				pTableName, 0);
-		goto trigger_cleanup;
-	}
-	if (!space_is_view(pTab) && tr_tm == TK_INSTEAD) {
-		sqlite3ErrorMsg(pParse, "cannot create INSTEAD OF"
-				" trigger on table: %S", pTableName, 0);
-		goto trigger_cleanup;
+		/* INSTEAD of triggers are only for views and
+		 * views only support INSTEAD of triggers.
+		 */
+		if (table->def->opts.is_view && tr_tm != TK_INSTEAD) {
+			sqlite3ErrorMsg(pParse,
+					"cannot create %s trigger on view: %S",
+					(tr_tm == TK_BEFORE) ?
+					"BEFORE" : "AFTER",
+					pTableName, 0);
+			goto trigger_cleanup;
+		}
+		if (!table->def->opts.is_view && tr_tm == TK_INSTEAD) {
+			sqlite3ErrorMsg(pParse,
+					"cannot create INSTEAD OF trigger "
+					"on table: %S", pTableName, 0);
+			goto trigger_cleanup;
+		}
 	}
 
 	/* INSTEAD OF triggers can only appear on views and BEFORE triggers
@@ -160,9 +169,8 @@ sqlite3BeginTrigger(Parse * pParse,	/* The parse context of the CREATE TRIGGER s
 	 * INSTEAD OF trigger into a BEFORE trigger.  It simplifies code
 	 * elsewhere.
 	 */
-	if (tr_tm == TK_INSTEAD) {
+	if (tr_tm == TK_INSTEAD)
 		tr_tm = TK_BEFORE;
-	}
 
 	/* Build the Trigger object */
 	pTrigger = (Trigger *) sqlite3DbMallocZero(db, sizeof(Trigger));
@@ -170,13 +178,22 @@ sqlite3BeginTrigger(Parse * pParse,	/* The parse context of the CREATE TRIGGER s
 		goto trigger_cleanup;
 	pTrigger->zName = zName;
 	zName = 0;
-	pTrigger->table = sqlite3DbStrDup(db, pTableName->a[0].zName);
+	pTrigger->table = strdup(pTableName->a[0].zName);
+	if (pTrigger->table == NULL) {
+		diag_set(OutOfMemory, strlen(pTableName->a[0].zName), "strdup",
+			 "pTrigger->table");
+		pParse->rc = SQL_TARANTOOL_ERROR;
+		goto trigger_cleanup;
+	}
 	pTrigger->pSchema = db->pSchema;
-	pTrigger->pTabSchema = pTab->pSchema;
+	pTrigger->pTabSchema = db->pSchema;
 	pTrigger->op = (u8) op;
 	pTrigger->tr_tm = tr_tm == TK_BEFORE ? TRIGGER_BEFORE : TRIGGER_AFTER;
 	pTrigger->pWhen = sqlite3ExprDup(db, pWhen, EXPRDUP_REDUCE);
 	pTrigger->pColumns = sqlite3IdListDup(db, pColumns);
+	if ((pWhen != NULL && pTrigger->pWhen == NULL) ||
+		(pColumns != NULL && pTrigger->pColumns == NULL))
+		goto trigger_cleanup;
 	assert(pParse->pNewTrigger == 0);
 	pParse->pNewTrigger = pTrigger;
 
@@ -210,7 +227,7 @@ sqlite3FinishTrigger(Parse * pParse,	/* Parser context */
 	DbFixer sFix;		/* Fixer object */
 	Token nameToken;	/* Trigger name for error reporting */
 
-	pParse->pNewTrigger = 0;
+	pParse->pNewTrigger = NULL;
 	if (NEVER(pParse->nErr) || !pTrig)
 		goto triggerfinish_cleanup;
 	zName = pTrig->zName;
@@ -227,10 +244,9 @@ sqlite3FinishTrigger(Parse * pParse,	/* Parser context */
 		goto triggerfinish_cleanup;
 	}
 
-	/* if we are not initializing,
-	 * generate byte code to insert a new trigger into Tarantool.
-	 */
-	if (!db->init.busy) {
+	/* Generate byte code to insert a new trigger into
+	 * Tarantool for non-parsig mode or export trigger. */
+	if (!pParse->parse_only) {
 		Vdbe *v;
 		int zOptsSz;
 		Table *pSysTrigger;
@@ -288,37 +304,11 @@ sqlite3FinishTrigger(Parse * pParse,	/* Parser context */
 			sqlite3VdbeChangeP5(v, OPFLAG_NCHANGE);
 		sqlite3VdbeAddOp1(v, OP_Close, iCursor);
 
-		/* parseschema3(reg(iFirstCol), ref(iFirstCol)+1) */
-		iFirstCol = pParse->nMem + 1;
-		pParse->nMem += 2;
-
 		sql_set_multi_write(pParse, false);
-		sqlite3VdbeAddOp4(v,
-				  OP_String8, 0, iFirstCol, 0,
-				  zName, P4_STATIC);
-
-		sqlite3VdbeAddOp4(v,
-				  OP_String8, 0, iFirstCol + 1, 0,
-				  zSql, P4_DYNAMIC);
 		sqlite3ChangeCookie(pParse);
-		sqlite3VdbeAddParseSchema3Op(v, iFirstCol);
-	}
-
-	if (db->init.busy) {
-		Trigger *pLink = pTrig;
-		Hash *pHash = &db->pSchema->trigHash;
-		pTrig = sqlite3HashInsert(pHash, zName, pTrig);
-		if (pTrig) {
-			sqlite3OomFault(db);
-		} else if (pLink->pSchema == pLink->pTabSchema) {
-			Table *pTab;
-			pTab =
-			    sqlite3HashFind(&pLink->pTabSchema->tblHash,
-					    pLink->table);
-			assert(pTab != 0);
-			pLink->pNext = pTab->pTrigger;
-			pTab->pTrigger = pLink;
-		}
+	} else {
+		pParse->pNewTrigger = pTrig;
+		pTrig = NULL;
 	}
 
  triggerfinish_cleanup:
@@ -329,7 +319,7 @@ sqlite3FinishTrigger(Parse * pParse,	/* Parser context */
 		   alloc for it either wasn't called at all or failed.  */
 	}
 	sqlite3DeleteTrigger(db, pTrig);
-	assert(!pParse->pNewTrigger);
+	assert(!pParse->pNewTrigger || pParse->parse_only);
 	sqlite3DeleteTriggerStep(db, pStepList);
 }
 
@@ -481,7 +471,7 @@ sqlite3DeleteTrigger(sqlite3 * db, Trigger * pTrigger)
 		return;
 	sqlite3DeleteTriggerStep(db, pTrigger->step_list);
 	sqlite3DbFree(db, pTrigger->zName);
-	sqlite3DbFree(db, pTrigger->table);
+	free(pTrigger->table);
 	sql_expr_delete(db, pTrigger->pWhen, false);
 	sqlite3IdListDelete(db, pTrigger->pColumns);
 	sqlite3DbFree(db, pTrigger);
@@ -568,34 +558,35 @@ sqlite3DropTriggerPtr(Parse * pParse, Trigger * pTrigger)
 			sqlite3VdbeChangeP5(v, OPFLAG_NCHANGE);
 
 		sqlite3ChangeCookie(pParse);
-		sqlite3VdbeAddOp4(v, OP_DropTrigger, 0, 0, 0, pTrigger->zName,
-				  0);
 	}
 }
 
-/*
- * Remove a trigger from the hash tables of the sqlite* pointer.
- */
-void
-sqlite3UnlinkAndDeleteTrigger(sqlite3 * db, const char *zName)
+int
+sql_trigger_delete_by_name(struct sqlite3 *db, const char *trigger_name)
 {
-	Trigger *pTrigger;
-	Hash *pHash;
 	struct session *user_session = current_session();
 
-	pHash = &(db->pSchema->trigHash);
-	pTrigger = sqlite3HashInsert(pHash, zName, 0);
-	if (ALWAYS(pTrigger)) {
-		if (pTrigger->pSchema == pTrigger->pTabSchema) {
-			Table *pTab = tableOfTrigger(pTrigger);
-			Trigger **pp;
-			for (pp = &pTab->pTrigger; *pp != pTrigger;
-			     pp = &((*pp)->pNext)) ;
+	struct Hash *hash = &(db->pSchema->trigHash);
+	struct Trigger *trigger = sqlite3HashInsert(hash, trigger_name, NULL);
+	assert(trigger != NULL);
+
+	if (trigger->pSchema == trigger->pTabSchema) {
+		uint32_t space_id = space_id_by_name(BOX_SPACE_ID,
+			trigger->table, strlen(trigger->table));
+		struct space *space = space_by_id(space_id);
+		/* Space could be already deleted. */
+		if (space != NULL) {
+			struct Trigger **pp;
+			for (pp = &space->sql_triggers;
+			     *pp != trigger;
+			     pp = &((*pp)->pNext));
 			*pp = (*pp)->pNext;
 		}
-		sqlite3DeleteTrigger(db, pTrigger);
-		user_session->sql_flags |= SQLITE_InternChanges;
 	}
+
+	sqlite3DeleteTrigger(db, trigger);
+	user_session->sql_flags |= SQLITE_InternChanges;
+	return 0;
 }
 
 /*
@@ -634,22 +625,18 @@ sqlite3TriggersExist(Table * pTab,	/* The table the contains the triggers */
     )
 {
 	int mask = 0;
-	Trigger *pList = 0;
-	Trigger *p;
+	struct Trigger *trigger_list = NULL;
 	struct session *user_session = current_session();
-
-	if ((user_session->sql_flags & SQLITE_EnableTrigger) != 0) {
-		pList = pTab->pTrigger;
-	}
-	for (p = pList; p; p = p->pNext) {
-		if (p->op == op && checkColumnOverlap(p->pColumns, pChanges)) {
+	if ((user_session->sql_flags & SQLITE_EnableTrigger) != 0)
+		trigger_list = space_trigger_list(pTab->def->id);
+	struct Trigger *p;
+	for (p = trigger_list; p; p = p->pNext) {
+		if (p->op == op && checkColumnOverlap(p->pColumns, pChanges))
 			mask |= p->tr_tm;
-		}
 	}
-	if (pMask) {
+	if (pMask)
 		*pMask = mask;
-	}
-	return (mask ? pList : 0);
+	return (mask ? trigger_list : 0);
 }
 
 /*
@@ -1153,6 +1140,57 @@ sqlite3TriggerColmask(Parse * pParse,	/* Parse context */
 	}
 
 	return mask;
+}
+
+const char *
+sql_trigger_get_table_name(struct Trigger *trigger)
+{
+	return trigger->table;
+}
+
+int
+sql_trigger_list_alter_table_name_transactional(struct Trigger *trigger,
+						const char *new_table_name)
+{
+	struct names_list_t {
+	    char *name;
+	    struct names_list_t *next;
+	} *names_list = NULL;
+
+	int rc = 0;
+	for (struct Trigger *t = trigger; t != NULL; t = t->pNext) {
+		struct names_list_t *node =
+			region_alloc(&fiber()->gc, sizeof(*node));
+		if (rc |= (node == NULL)) {
+			diag_set(OutOfMemory, sizeof(*node), "region_alloc",
+				 "node");
+			break;
+		}
+		node->name = strdup(new_table_name);
+		if (rc |= (node->name == NULL)) {
+			diag_set(OutOfMemory, strlen(new_table_name), "strdup",
+				 "node->name");
+			break;
+		}
+		node->next = names_list;
+		names_list = node;
+	}
+	if (rc != 0)
+		goto error;
+
+	for (struct Trigger *t = trigger; t != NULL; t = t->pNext) {
+		free(t->table);
+		t->table = names_list->name;
+		names_list = names_list->next;
+	}
+	return 0;
+
+error:
+	while (names_list != NULL) {
+		free(names_list->name);
+		names_list = names_list->next;
+	}
+	return -1;
 }
 
 #endif				/* !defined(SQLITE_OMIT_TRIGGER) */

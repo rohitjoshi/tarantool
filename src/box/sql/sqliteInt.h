@@ -1935,7 +1935,6 @@ struct Table {
 #ifndef SQLITE_OMIT_ALTERTABLE
 	int addColOffset;	/* Offset in CREATE TABLE stmt to add a new column */
 #endif
-	Trigger *pTrigger;	/* List of triggers stored in pSchema */
 	Schema *pSchema;	/* Schema that contains this table */
 	Table *pNextZombie;	/* Next on the Parse.pZombieTab list */
 	/** Space definition with Tarantool metadata. */
@@ -4028,7 +4027,6 @@ TriggerStep *sqlite3TriggerUpdateStep(sqlite3 *, Token *, ExprList *, Expr *,
 				      u8);
 TriggerStep *sqlite3TriggerDeleteStep(sqlite3 *, Token *, Expr *);
 void sqlite3DeleteTrigger(sqlite3 *, Trigger *);
-void sqlite3UnlinkAndDeleteTrigger(sqlite3 *, const char *);
 u32 sqlite3TriggerColmask(Parse *, Trigger *, ExprList *, int, int, Table *,
 			  int);
 #define sqlite3ParseToplevel(p) ((p)->pToplevel ? (p)->pToplevel : (p))

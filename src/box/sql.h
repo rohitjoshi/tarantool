@@ -66,6 +66,7 @@ struct Expr;
 struct Parse;
 struct Select;
 struct Table;
+struct Trigger;
 
 /**
  * Perform parsing of provided expression. This is done by
@@ -82,6 +83,67 @@ struct Table;
 int
 sql_expr_compile(struct sqlite3 *db, const char *expr, int expr_len,
 		 struct Expr **result);
+
+/**
+ * Perform parsing of provided SQL request and construct trigger AST.
+ * @param db SQL context handle.
+ * @param sql request to parse.
+ * @param[out] trigger Result: AST structure.
+ *
+ * @retval Error code if any.
+ */
+int
+sql_trigger_compile(struct sqlite3 *db, const char *sql,
+		    struct Trigger **trigger);
+
+/**
+ * Remove a trigger from the hash tables of the sqlite* pointer.
+ * @param db SQL handle.
+ * @param trigger_name to delete.
+ *
+ * @retval Error code if any.
+ */
+int
+sql_trigger_delete_by_name(struct sqlite3 *db, const char *trigger_name);
+
+/**
+ * Get server triggers list by space_id.
+ * @param space_id Space ID.
+ * @retval NULL on error.
+ * @param not NULL on success.
+ */
+struct Trigger *
+space_trigger_list(uint32_t space_id);
+
+/**
+ * Perform insert trigger in appropriate space.
+ * @param space_id id of the space to append trigger.
+ * @param trigger object to append.
+ *
+ * @retval Error code if any.
+ */
+int
+sql_trigger_insert(uint32_t space_id, struct Trigger *trigger);
+
+/**
+ * Get table name of specified trigger.
+ * @param trigger containing a table name.
+ * @param new_table_name with new_name (optional).
+ * @retval table name string.
+ */
+const char *
+sql_trigger_get_table_name(struct Trigger *trigger);
+
+/**
+ * Rename specified trigger list.
+ * @param trigger containing a table name.
+ * @param new_table_name with new_name (optional).
+ *
+ * @retval Error code if any.
+ */
+int
+sql_trigger_list_alter_table_name_transactional(struct Trigger *trigger,
+						const char *new_table_name);
 
 /**
  * Store duplicate of a parsed expression into @a parser.

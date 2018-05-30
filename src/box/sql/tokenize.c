@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <unicode/utf8.h>
 #include <unicode/uchar.h>
+#include "box/schema.h"
 
 #include "say.h"
 #include "sqliteInt.h"
@@ -528,7 +529,10 @@ sqlite3RunParser(Parse * pParse, const char *zSql, char **pzErrMsg)
 
 	if (pParse->pWithToFree)
 		sqlite3WithDelete(db, pParse->pWithToFree);
-	sqlite3DeleteTrigger(db, pParse->pNewTrigger);
+	/* Trigger is exporting with pNewTrigger field when
+	 * parse_only flag is set. */
+	if (!pParse->parse_only)
+		sqlite3DeleteTrigger(db, pParse->pNewTrigger);
 	sqlite3DbFree(db, pParse->pVList);
 	while (pParse->pZombieTab) {
 		Table *p = pParse->pZombieTab;
@@ -564,5 +568,42 @@ sql_expr_compile(sqlite3 *db, const char *expr, int expr_len,
 	}
 	*result = parser.parsed_expr;
 	sql_parser_destroy(&parser);
+	return 0;
+}
+
+int
+sql_trigger_compile(struct sqlite3 *db, const char *sql,
+		    struct Trigger **trigger)
+{
+	struct Parse parser;
+	sql_parser_create(&parser, db);
+	parser.parse_only = true;
+	char *unused;
+	if (sqlite3RunParser(&parser, sql, &unused) != SQLITE_OK) {
+		diag_set(ClientError, ER_SQL_EXECUTE, sql);
+		return -1;
+	}
+	*trigger = parser.pNewTrigger;
+	sql_parser_destroy(&parser);
+	return 0;
+}
+
+
+int
+sql_trigger_insert(uint32_t space_id, struct Trigger *trigger)
+{
+	struct space *space = space_cache_find(space_id);
+	assert(space != NULL);
+	struct Hash *pHash = &trigger->pSchema->trigHash;
+	char *zName = trigger->zName;
+	void *ret = sqlite3HashInsert(pHash, zName, trigger);
+	if (ret != NULL) {
+		/* Triggers couldn't present in hash.
+		 * So this is definitely a memory error. */
+		diag_set(OutOfMemory, 0, "sqlite3HashInsert", "hash");
+		return -1;
+	}
+	trigger->pNext = space->sql_triggers;
+	space->sql_triggers = trigger;
 	return 0;
 }

@@ -53,6 +53,7 @@
 #include "version.h"
 #include "sequence.h"
 #include "sql.h"
+#include "box.h"
 
 /**
  * chap-sha1 of empty string, i.e.
@@ -551,6 +552,9 @@ space_swap_triggers(struct space *new_space, struct space *old_space)
 	rlist_swap(&new_space->before_replace, &old_space->before_replace);
 	rlist_swap(&new_space->on_replace, &old_space->on_replace);
 	rlist_swap(&new_space->on_stmt_begin, &old_space->on_stmt_begin);
+	/** Copy SQL Triggers pointer. */
+	new_space->sql_triggers = old_space->sql_triggers;
+	old_space->sql_triggers = NULL;
 }
 
 /**
@@ -733,6 +737,20 @@ alter_space_commit(struct trigger *trigger, void *event)
 
 	trigger_run_xc(&on_alter_space, alter->new_space);
 
+	if (alter->new_space->sql_triggers != NULL &&
+	    strcmp(alter->new_space->def->name,
+		   alter->old_space->def->name) != 0) {
+		/*
+		 * The function below either changes the name of
+		 * all triggers, or does not change any of them.
+		 * It should be last action in alter_space_commit
+		 * as it is difficult to guarantee its rollback.
+		 */
+		if (sql_trigger_list_alter_table_name_transactional(
+			alter->new_space->sql_triggers,
+			alter->new_space->def->name) != 0)
+			diag_raise();
+	}
 	alter->new_space = NULL; /* for alter_space_delete(). */
 	/*
 	 * Delete the old version of the space, we are not
@@ -3100,6 +3118,45 @@ on_replace_dd_trigger(struct trigger * /* trigger */, void *event)
 {
 	struct txn *txn = (struct txn *) event;
 	txn_check_singlestatement_xc(txn, "Space _trigger");
+
+	struct txn_stmt *stmt = txn_current_stmt(txn);
+	if (stmt->old_tuple != NULL) {
+		uint32_t trigger_name_len;
+		const char *trigger_name_src =
+			tuple_field_str_xc(stmt->old_tuple, 0,
+					   &trigger_name_len);
+		/* Can't use static buff as TT_STATIC_BUF_LEN
+		 * is not enough for identifier max len test. */
+		char *trigger_name =
+			(char *)region_alloc_xc(&fiber()->gc, trigger_name_len);
+		sprintf(trigger_name, "%.*s", trigger_name_len,
+			trigger_name_src);
+		if (sql_trigger_delete_by_name(sql_get(), trigger_name) != 0)
+			diag_raise();
+	}
+	if (stmt->new_tuple != NULL) {
+		const char *space_opts =
+			tuple_field_with_type_xc(stmt->new_tuple, 1, MP_MAP);
+		struct space_opts opts;
+		struct region *region = &fiber()->gc;
+		space_opts_decode(&opts, space_opts, region);
+
+		struct Trigger *trigger;
+		if (sql_trigger_compile(sql_get(), opts.sql, &trigger) != 0)
+			diag_raise();
+		assert(trigger != NULL);
+		const char *table_name =
+			sql_trigger_get_table_name(trigger);
+		if (table_name == NULL)
+			diag_raise();
+		uint32_t space_id =
+			space_id_by_name(BOX_SPACE_ID, table_name,
+					 strlen(table_name));
+		if (space_id == BOX_ID_NIL)
+			diag_raise();
+		if (sql_trigger_insert(space_id, trigger) != 0)
+			diag_raise();
+	}
 }
 
 struct trigger alter_space_on_replace_space = {
