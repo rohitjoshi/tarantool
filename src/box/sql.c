@@ -77,11 +77,18 @@ sql_init()
 		panic("failed to initialize SQL subsystem");
 
 	assert(db != NULL);
+	/* Initialize pSchema to use SQL parser. */
+	db->pSchema = sqlite3SchemaCreate(db);
+	if (db->pSchema == NULL) {
+		sqlite3_close(db);
+		panic("failed to initialize SQL Schema subsystem");
+	}
 }
 
 void
 sql_load_schema()
 {
+	assert(db->pSchema != NULL);
 	int rc;
 	struct session *user_session = current_session();
 	int commit_internal = !(user_session->sql_flags
@@ -89,7 +96,6 @@ sql_load_schema()
 
 	assert(db->init.busy == 0);
 	db->init.busy = 1;
-	db->pSchema = sqlite3SchemaCreate(db);
 	rc = sqlite3InitDatabase(db);
 	if (rc != SQLITE_OK) {
 		sqlite3SchemaClear(db);
