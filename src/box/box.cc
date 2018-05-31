@@ -877,7 +877,7 @@ box_return_tuple(box_function_ctx_t *ctx, box_tuple_t *tuple)
 
 /* schema_find_id()-like method using only public API */
 uint32_t
-box_space_id_by_name(const char *name, uint32_t len)
+space_id_by_name(uint32_t system_space_id, const char *name, uint32_t len)
 {
 	if (len > BOX_NAME_MAX)
 		return BOX_ID_NIL;
@@ -892,13 +892,19 @@ box_space_id_by_name(const char *name, uint32_t len)
 
 	/* NOTE: error and missing key cases are indistinguishable */
 	box_tuple_t *tuple;
-	if (box_index_get(BOX_VSPACE_ID, 2, begin, end, &tuple) != 0)
+	if (box_index_get(system_space_id, 2, begin, end, &tuple) != 0)
 		return BOX_ID_NIL;
 	if (tuple == NULL)
 		return BOX_ID_NIL;
 	uint32_t result = BOX_ID_NIL;
 	(void) tuple_field_u32(tuple, BOX_SPACE_FIELD_ID, &result);
 	return result;
+}
+
+uint32_t
+box_space_id_by_name(const char *name, uint32_t len)
+{
+	return space_id_by_name(BOX_VSPACE_ID, name, len);
 }
 
 uint32_t

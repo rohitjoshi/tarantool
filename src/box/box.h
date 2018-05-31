@@ -220,6 +220,20 @@ API_EXPORT int
 box_return_tuple(box_function_ctx_t *ctx, box_tuple_t *tuple);
 
 /**
+ * Find space id by name in specified system space.
+ *
+ * This function performs SELECT request to _vspace system space.
+ * \param system_space_id space to lookup name.
+ * \param name space name
+ * \param len length of \a name
+ * \retval BOX_ID_NIL on error or if not found (check box_error_last())
+ * \retval space_id otherwise
+ * \sa box_index_id_by_name
+ */
+uint32_t
+space_id_by_name(uint32_t system_space_id, const char *name, uint32_t len);
+
+/**
  * Find space id by name.
  *
  * This function performs SELECT request to _vspace system space.
